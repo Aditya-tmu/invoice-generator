@@ -12,7 +12,7 @@ function App() {
         <InvoiceForm />
       </main>
       <footer className="text-center mt-4 py-3 bg-light">
-        <p>&copy; 2025 Your Company. Built with Gemini.</p>
+        <p>&copy; 2025 Maa Vindywashini Hardware. Built by Aditya Upadhyay</p>
       </footer>
     </div>
   );

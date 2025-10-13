@@ -7,6 +7,7 @@ const exceljs = require('exceljs');
 const fs = require('fs');
 const path = require('path');
 const { toWords } = require('number-to-words');
+const QRCode = require('qrcode');
 
 const app = express();
 const port = 5000;
@@ -26,121 +27,179 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// --- PDF Generation Logic (New Layout) ---
-const generatePdf = (invoiceData, logoPath, stream) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
-    doc.pipe(stream);
-
-    // 1. "TAX INVOICE" on top middle
-    doc.font('Helvetica-Bold').fontSize(20).text('TAX INVOICE', { align: 'center' });
-    doc.moveDown();
-
-    // 2. Header: Logo left, Business details middle
-    const headerY = doc.y;
-    if (logoPath && fs.existsSync(logoPath)) {
-        doc.image(logoPath, 50, headerY, { width: 100 });
-    }
-
-    doc.font('Helvetica-Bold').fontSize(16).text(invoiceData.businessDetails.name, 250, headerY, { align: 'center' });
-    doc.font('Helvetica').fontSize(10);
-    doc.text(invoiceData.businessDetails.address, 250, doc.y, { align: 'center' });
-    const contactInfo = [
-        `GSTIN: ${invoiceData.businessDetails.gstin}`,
-        `Contact: ${invoiceData.businessDetails.contact}`,
-        `Email: ${invoiceData.businessDetails.email}`
-    ].filter(Boolean).join(' | ');
-    doc.text(contactInfo, 250, doc.y, { align: 'center' });
-    
-    doc.y = headerY + 100; // Set Y for the next section
-
-    // 3. Sub-Header: Bill To/Ship To left, Invoice details right
-    const subHeaderY = doc.y;
-    doc.font('Helvetica-Bold').text('Bill To:', 50, subHeaderY);
-    doc.font('Helvetica').text(invoiceData.customerDetails.billTo.name, 50, doc.y);
-    doc.text(invoiceData.customerDetails.billTo.address, 50, doc.y, { width: 200 });
-    doc.text(`GSTIN: ${invoiceData.customerDetails.billTo.gstin}`, 50, doc.y);
-
-    const invoiceDetailsX = 350;
-    doc.font('Helvetica-Bold').text(`Invoice #:`, invoiceDetailsX, subHeaderY);
-    doc.font('Helvetica').text(invoiceData.invoiceDetails.number, invoiceDetailsX + 70, subHeaderY);
-
-    doc.font('Helvetica-Bold').text(`Invoice Date:`, invoiceDetailsX, subHeaderY + 15);
-    doc.font('Helvetica').text(invoiceData.invoiceDetails.date, invoiceDetailsX + 70, subHeaderY + 15);
-
-    doc.moveDown(3);
-
-    // 4. Product Details Table
-    const tableTop = doc.y;
-    doc.font('Helvetica-Bold');
-    const tableHeaders = ['Item', 'HSN', 'Qty', 'Unit', 'Rate', 'Discount', 'GST', 'Total'];
-    const colWidths = [125, 65, 40, 40, 60, 60, 50, 70];
-    let x = 50;
-    tableHeaders.forEach((header, i) => {
-        doc.rect(x, tableTop, colWidths[i], 20).stroke();
-        doc.text(header, x + 5, tableTop + 5, { width: colWidths[i] - 10 });
-        x += colWidths[i];
-    });
-
-    doc.font('Helvetica');
-    let tableY = tableTop + 20;
-    invoiceData.items.forEach(item => {
-        x = 50;
-        const itemData = [ item.name, item.hsn, item.quantity, item.unit, `Rs ${parseFloat(item.rate).toFixed(2)}`, `${item.discount || 0}%`, `${item.gst}%`, `Rs ${parseFloat(item.total).toFixed(2)}`];
-        const rowHeight = 25;
-        itemData.forEach((cell, i) => {
-            doc.rect(x, tableY, colWidths[i], rowHeight).stroke();
-            doc.text(cell, x + 5, tableY + 5, { width: colWidths[i] - 10 });
-            x += colWidths[i];
+// --- PDF Generation Logic (Modern Template) ---
+const generatePdf = (invoiceData, logoPath, signaturePath) => {
+    return new Promise(async (resolve, reject) => {
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        const buffers = [];
+        doc.on('data', buffers.push.bind(buffers));
+        doc.on('end', () => {
+            const pdfData = Buffer.concat(buffers);
+            resolve(pdfData);
         });
-        tableY += rowHeight;
-        if (tableY > 650) { doc.addPage(); tableY = 50; }
+        doc.on('error', reject);
+
+        try {
+            const brandColor = '#003d6b'; // A deep blue
+
+            // 1. Header
+            doc.fillColor(brandColor).fontSize(20).font('Helvetica-Bold').text(invoiceData.invoiceDetails.type.toUpperCase(), { align: 'center' });
+            doc.moveDown();
+
+            const headerY = doc.y;
+            if (logoPath && fs.existsSync(logoPath)) {
+                doc.image(logoPath, 50, headerY, { width: 100 });
+            }
+
+            doc.fillColor('#333').fontSize(16).font('Helvetica-Bold').text(invoiceData.businessDetails.name, 200, headerY, { align: 'center' });
+            doc.fontSize(10).font('Helvetica').text(invoiceData.businessDetails.address, 200, doc.y, { align: 'center' });
+            const contactInfo = [
+                invoiceData.businessDetails.gstin ? `GSTIN: ${invoiceData.businessDetails.gstin}` : null,
+                invoiceData.businessDetails.contact ? `Contact: ${invoiceData.businessDetails.contact}` : null,
+                invoiceData.businessDetails.email ? `Email: ${invoiceData.businessDetails.email}` : null
+            ].filter(Boolean).join(' | ');
+            doc.text(contactInfo, 200, doc.y, { align: 'center' });
+            
+            // Ensure y position is below the logo
+            if (doc.y < headerY + 100) {
+                doc.y = headerY + 100;
+            }
+            doc.moveDown();
+
+            // 2. Customer & Invoice Details
+            doc.rect(50, doc.y, 500, 2).fill(brandColor);
+            doc.moveDown();
+            const detailsY = doc.y;
+            doc.fontSize(12).font('Helvetica-Bold').text('Bill To:', 50, detailsY);
+            doc.font('Helvetica').text(invoiceData.customerDetails.billTo.name, 50, doc.y);
+            doc.text(invoiceData.customerDetails.billTo.address, 50, doc.y, { width: 200 });
+            doc.text(`GSTIN: ${invoiceData.customerDetails.billTo.gstin}`, 50, doc.y);
+
+            const invoiceDetailsX = 350;
+            doc.font('Helvetica-Bold').text(`Invoice #: ${invoiceData.invoiceDetails.number}`, invoiceDetailsX, detailsY);
+            doc.font('Helvetica').text(`Date: ${invoiceData.invoiceDetails.date}`, invoiceDetailsX, doc.y);
+            doc.moveDown(4);
+
+            // 3. Items Table
+            const tableTop = doc.y;
+            doc.font('Helvetica-Bold').fontSize(9);
+            const tableHeaders = ['#', 'Item', 'HSN', 'Qty', 'Rate', 'Total', 'GST', 'Amount'];
+            const colWidths = [30, 150, 60, 40, 60, 60, 50, 50];
+            
+            // Draw table header
+            let x = 50;
+            doc.rect(x, tableTop, colWidths.reduce((a, b) => a + b), 25).fill(brandColor);
+            doc.fillColor('#FFF');
+            tableHeaders.forEach((header, i) => {
+                doc.text(header, x, tableTop + 8, { width: colWidths[i], align: 'center' });
+                x += colWidths[i];
+            });
+            doc.fillColor('#333');
+
+            let tableY = tableTop + 25;
+            doc.fontSize(9); // Set font size for table body
+            invoiceData.items.forEach((item, index) => {
+                x = 50;
+                const itemData = [
+                    String(index + 1),
+                    item.name,
+                    item.hsn,
+                    item.quantity,
+                    Number(item.rate).toFixed(2),
+                    (Number(item.quantity) * Number(item.rate)).toFixed(2),
+                    `${Number(item.cgst) + Number(item.sgst)}%`,
+                    Number(item.amount).toFixed(2)
+                ];
+                const rowHeight = 30;
+                doc.rect(x, tableY, colWidths.reduce((a, b) => a + b), rowHeight).stroke('#EEE');
+                itemData.forEach((cell, i) => {
+                    doc.text(cell, x, tableY + 10, { width: colWidths[i], align: 'center' });
+                    x += colWidths[i];
+                });
+                tableY += rowHeight;
+            });
+
+            // 4. Summary
+            const summaryX = 350;
+            let summaryY = tableY + 20;
+            doc.font('Helvetica-Bold').fontSize(10).text('Subtotal:', summaryX, summaryY);
+            doc.font('Helvetica').text(`Rs ${Number(invoiceData.summary.subtotal).toFixed(2)}`, summaryX + 100, summaryY, { align: 'right' });
+            summaryY += 20;
+
+            const cgstPercentage = invoiceData.items.length > 0 ? invoiceData.items[0].cgst : 0;
+            const sgstPercentage = invoiceData.items.length > 0 ? invoiceData.items[0].sgst : 0;
+            const cgstAmount = invoiceData.summary.taxAmount / 2;
+            const sgstAmount = invoiceData.summary.taxAmount / 2;
+
+            doc.font('Helvetica-Bold').text(`CGST @ ${cgstPercentage}%:`, summaryX, summaryY);
+            doc.font('Helvetica').text(`Rs ${Number(cgstAmount).toFixed(2)}`, summaryX + 100, summaryY, { align: 'right' });
+            summaryY += 20;
+
+            doc.font('Helvetica-Bold').text(`SGST @ ${sgstPercentage}%:`, summaryX, summaryY);
+            doc.font('Helvetica').text(`Rs ${Number(sgstAmount).toFixed(2)}`, summaryX + 100, summaryY, { align: 'right' });
+            summaryY += 20;
+
+            const roundedGrandTotal = Math.round(invoiceData.summary.grandTotal);
+            const roundingDifference = roundedGrandTotal - invoiceData.summary.grandTotal;
+            if (roundingDifference !== 0) {
+                doc.font('Helvetica-Bold').text('Round Off:', summaryX, summaryY);
+                doc.font('Helvetica').text(roundingDifference.toFixed(2), summaryX + 100, summaryY, { align: 'right' });
+                summaryY += 20;
+            }
+
+            doc.font('Helvetica-Bold').fontSize(14).text('Grand Total:', summaryX, summaryY);
+            doc.text(`Rs ${roundedGrandTotal.toFixed(2)}`, summaryX + 100, summaryY, { align: 'right' });
+
+            // Amount in words
+            const grandTotalForWords = roundedGrandTotal;
+            const amountInWords = toWords(grandTotalForWords).replace(/,/g, '').replace(/\b\w/g, l => l.toUpperCase()) + ' Only';
+            doc.font('Helvetica-Bold').fontSize(10).text('Amount in Words:', 50, tableY + 20);
+            doc.font('Helvetica').text(amountInWords, 50, doc.y, { width: 250 });
+
+            // 5. Footer
+            const footerY = 650;
+            doc.rect(50, footerY, 500, 2).fill(brandColor);
+            doc.moveDown();
+
+            const footerSectionY = footerY + 15;
+
+            // Bank Details (Left)
+            doc.fontSize(10).font('Helvetica-Bold').text('Bank Details', 50, footerSectionY);
+            doc.font('Helvetica').text(`Bank: ${invoiceData.bankDetails.name}`, 50, doc.y);
+            doc.text(`A/C: ${invoiceData.bankDetails.accountNumber}`, 50, doc.y);
+            doc.text(`IFSC: ${invoiceData.bankDetails.ifsc}`, 50, doc.y);
+
+            // QR Code (Middle)
+            if (invoiceData.generateQr && invoiceData.bankDetails && invoiceData.bankDetails.upi) {
+                const roundedGrandTotal = Math.round(invoiceData.summary.grandTotal);
+                const payeeName = encodeURIComponent(invoiceData.businessDetails.name);
+                const transactionNote = encodeURIComponent(`Invoice ${invoiceData.invoiceDetails.number}`);
+
+                const upiString = `upi://pay?pa=${invoiceData.bankDetails.upi}&pn=${payeeName}&am=${roundedGrandTotal}&cu=INR&tn=${transactionNote}`;
+
+                const qrCode = await QRCode.toDataURL(upiString);
+                doc.image(qrCode, 250, footerSectionY, { width: 80 });
+                doc.font('Helvetica').text('Scan to Pay', 250, footerSectionY + 85, {width: 80, align: 'center'});
+            }
+
+            // Authorised Signatory (Right)
+            const signatoryX = 400;
+            doc.font('Helvetica-Bold').text('Authorised Signatory', signatoryX, footerSectionY, {width: 120, align: 'center'});
+            if (signaturePath && fs.existsSync(signaturePath)) {
+                doc.image(signaturePath, signatoryX, footerSectionY + 15, { width: 120, align: 'center' });
+            }
+
+            doc.fontSize(8).fillColor('#777').text('This is a computer-generated invoice.', 50, 780, { align: 'center' });
+
+            doc.end();
+
+        } catch (error) {
+            reject(error);
+        }
     });
-
-    // --- Summary Section (right aligned) & Amount in Words (left aligned) ---
-    const summaryY = tableY + 10;
-    
-    // Summary on the right
-    const summaryX = 350;
-    doc.font('Helvetica-Bold').text('Subtotal:', summaryX, summaryY);
-    doc.font('Helvetica').text(`Rs ${invoiceData.summary.subtotal.toFixed(2)}`, summaryX + 100, summaryY, { align: 'right' });
-    doc.font('Helvetica-Bold').text('GST:', summaryX, doc.y);
-    doc.font('Helvetica').text(`Rs ${invoiceData.summary.taxAmount.toFixed(2)}`, summaryX + 100, doc.y - 15, { align: 'right' });
-    const grandTotalY = doc.y + 5;
-    doc.font('Helvetica-Bold').fontSize(12).text('Grand Total:', summaryX, grandTotalY);
-    doc.text(`Rs ${invoiceData.summary.grandTotal.toFixed(2)}`, summaryX + 100, grandTotalY, { align: 'right' });
-
-    // Amount in words on the left
-    const amountInWords = toWords(invoiceData.summary.grandTotal).replace(/,/g, '').replace(/\b\w/g, l => l.toUpperCase()) + ' Only';
-    doc.font('Helvetica-Bold').text('Amount in Words (INR):', 50, summaryY);
-    doc.font('Helvetica').text(amountInWords, 50, summaryY + 15, { width: 250 });
-
-    doc.moveDown(3);
-
-    // 6. Footer: Bank/Terms left, Signatory right
-    let footerY = doc.y;
-    if (footerY > 600) { // Check if footer needs to move to a new page
-        doc.addPage();
-        footerY = 50;
-    }
-
-    doc.font('Helvetica-Bold').text('Bank Details:', 50, footerY);
-    doc.font('Helvetica').text(`Bank: ${invoiceData.bankDetails.name}`, 50, footerY + 15);
-    doc.text(`A/C No: ${invoiceData.bankDetails.accountNumber}`, 50, footerY + 30);
-    doc.text(`IFSC: ${invoiceData.bankDetails.ifsc}`, 50, footerY + 45);
-
-    doc.font('Helvetica-Bold').text('Terms & Conditions:', 50, footerY + 75);
-    doc.font('Helvetica').text(invoiceData.terms, 50, footerY + 90, { width: 250 });
-
-    const signatoryY = footerY > doc.y ? footerY : doc.y;
-    doc.font('Helvetica-Bold').text('Authorised Signatory', 350, signatoryY, { align: 'right' });
-
-    // Final footer text
-    doc.fontSize(8).text('This is a computer generated invoice.', 50, 780, { align: 'center', width: 500 });
-
-    doc.end();
 };
 
-// --- Excel Generation Logic (Unchanged) ---
+// --- Excel Generation Logic (Fixed) ---
 const generateExcel = async (invoiceData, stream) => {
     const workbook = new exceljs.Workbook();
     const worksheet = workbook.addWorksheet('Invoice');
@@ -148,40 +207,59 @@ const generateExcel = async (invoiceData, stream) => {
     worksheet.getCell('A1').value = invoiceData.businessDetails.name;
     worksheet.getCell('A1').font = { size: 20, bold: true };
     worksheet.getCell('A1').alignment = { horizontal: 'center' };
-    worksheet.getRow(5).values = ['Item Name', 'HSN Code', 'Quantity', 'Unit', 'Rate', 'Discount (%)', 'GST (%)', 'Total'];
+    worksheet.getRow(5).values = ['Item Name', 'HSN Code', 'Quantity', 'Unit', 'Rate', 'Discount (%)', 'CGST (%)', 'SGST (%)', 'Amount']; // Fixed header
     worksheet.getRow(5).font = { bold: true };
     let currentRow = 6;
     invoiceData.items.forEach(item => {
-        worksheet.getRow(currentRow).values = [item.name, item.hsn, item.quantity, item.unit, parseFloat(item.rate), parseFloat(item.discount) || 0, parseFloat(item.gst), parseFloat(item.total)];
+        worksheet.getRow(currentRow).values = [
+            item.name,
+            item.hsn,
+            item.quantity,
+            item.unit,
+            parseFloat(item.rate || 0),
+            parseFloat(item.discount || 0),
+            parseFloat(item.cgst || 0), // CGST %
+            parseFloat(item.sgst || 0), // SGST %
+            parseFloat(item.amount || 0)
+        ];
         currentRow++;
     });
     worksheet.getCell(`G${currentRow + 1}`).value = 'Subtotal';
     worksheet.getCell(`H${currentRow + 1}`).value = invoiceData.summary.subtotal;
-    worksheet.getCell(`G${currentRow + 2}`).value = 'Tax Amount';
-    worksheet.getCell(`H${currentRow + 2}`).value = invoiceData.summary.taxAmount;
-    worksheet.getCell(`G${currentRow + 3}`).value = 'Grand Total';
-    worksheet.getCell(`H${currentRow + 3}`).value = invoiceData.summary.grandTotal;
-    worksheet.getCell(`G${currentRow + 3}`).font = { bold: true };
-    worksheet.getCell(`H${currentRow + 3}`).font = { bold: true };
+    worksheet.getCell(`G${currentRow + 2}`).value = 'CGST';
+    worksheet.getCell(`H${currentRow + 2}`).value = invoiceData.summary.taxAmount / 2;
+    worksheet.getCell(`G${currentRow + 3}`).value = 'SGST';
+    worksheet.getCell(`H${currentRow + 3}`).value = invoiceData.summary.taxAmount / 2;
+    worksheet.getCell(`G${currentRow + 4}`).value = 'Grand Total';
+    worksheet.getCell(`H${currentRow + 4}`).value = invoiceData.summary.grandTotal;
+    worksheet.getCell(`G${currentRow + 4}`).font = { bold: true };
+    worksheet.getCell(`H${currentRow + 4}`).font = { bold: true };
     await workbook.xlsx.write(stream);
 };
 
 // --- API Endpoints ---
-app.post('/api/generate', upload.single('logo'), (req, res) => {
-    const invoiceData = JSON.parse(req.body.invoiceData);
-    const format = req.body.format;
-    const logoPath = req.file ? req.file.path : null;
+app.post('/api/generate', upload.fields([{ name: 'logo', maxCount: 1 }, { name: 'signature', maxCount: 1 }]), async (req, res) => {
+    try {
+        const invoiceData = JSON.parse(req.body.invoiceData);
+        const format = req.body.format;
+        const logoPath = req.files.logo ? req.files.logo[0].path : null;
+        const signaturePath = req.files.signature ? req.files.signature[0].path : null;
 
-    if (format === 'pdf') {
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename=invoice-${invoiceData.invoiceDetails.number}.pdf`);
-        generatePdf(invoiceData, logoPath, res);
-    } else if (format === 'excel') {
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=invoice-${invoiceData.invoiceDetails.number}.xlsx`);
-        generateExcel(invoiceData, res).then(() => res.end());
-    } else {
-        res.status(400).send('Invalid format requested');
+        if (format === 'pdf') {
+            const pdfData = await generatePdf(invoiceData, logoPath, signaturePath);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename=invoice-${invoiceData.invoiceDetails.number}.pdf`);
+            res.send(pdfData);
+        } else if (format === 'excel') {
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', `attachment; filename=invoice-${invoiceData.invoiceDetails.number}.xlsx`);
+            generateExcel(invoiceData, res).then(() => res.end());
+        } else {
+            res.status(400).send('Invalid format requested');
+        }
+    } catch (error) {
+        console.error("Error processing request:", error);
+        res.status(500).send("Error processing your request.");
     }
 });
 
