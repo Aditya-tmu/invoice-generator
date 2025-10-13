@@ -61,4 +61,4 @@ Make sure you have the following installed on your system:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
+This project is licensed under the MIT License - see the [LICENSE.md](invoice-generator/LICENSE.md) file for details.
